@@ -36,7 +36,7 @@ interface GameStartedPacket extends Packet {
 interface GameStartedBroadcastPacket extends Packet {
     flag: 'start'
     seq: number
-    ack: number
+    ack?: number
 }
 
 interface DataPacket extends Packet {
@@ -52,7 +52,7 @@ interface BroadcastPacket extends Packet {
     data: any
     player: number
     seq: number
-    ack: number
+    ack?: number
 }
 
 interface AcknowledgementPacket extends Packet {
@@ -132,8 +132,8 @@ function receiveAcknowledgementPacket(packet: AcknowledgementPacket, player: num
     }
 }
 
-function receiveGameStartedPacket(packet: GameStartedPacket) {
-    sendGameStartedBroadcast(packet.seq)
+function receiveGameStartedPacket(packet: GameStartedPacket, player) {
+    sendGameStartedBroadcast(packet.seq, player)
 }
 
 // SENDERS
@@ -147,13 +147,13 @@ function sendAcknowledgement(player: number, seq: number) {
     server.send(JSON.stringify(packet), destination.port, destination.address)
 }
 
-function sendGameStartedBroadcast(seq: number) {
+function sendGameStartedBroadcast(seq: number, sourcePlayer) {
     const packet: GameStartedBroadcastPacket = {
         flag: 'start',
-        ack: seq,
         seq: localSeq
     }
     Object.values(connections).forEach((connection) => {
+        if (connection.player === sourcePlayer) packet.ack = seq
         packet.seq = localSeq
         server.send(JSON.stringify(packet), connection.port, connection.address)
         expectAcknowledgement[localSeq] = {packet, player: connection.player, ttl: resendThreshold}
@@ -191,7 +191,6 @@ function sendBroadcast(player: number, data: any, seq: number, step: number) {
     const packet: BroadcastPacket = {
         flag: 'broadcast',
         seq: localSeq,
-        ack: seq,
         player,
         data,
         step
@@ -199,6 +198,7 @@ function sendBroadcast(player: number, data: any, seq: number, step: number) {
     // TODO: fix sending the same ack to every player rather than just the one we are responding to
     // Same issue exists on other senders
     Object.values(connections).forEach((connection) => {
+        if (connection.player === player) packet.ack = seq
         packet.seq = localSeq
         server.send(JSON.stringify(packet), connection.port, connection.address)
         expectAcknowledgement[localSeq] = {packet, player: connection.player, ttl: resendThreshold}
@@ -232,7 +232,7 @@ server.on('message', (data: string, rinfo) => {
         case 'disconnect':
             break
         case 'start':
-            receiveGameStartedPacket(<GameStartedPacket>packet)
+            receiveGameStartedPacket(<GameStartedPacket>packet, sender)
             break
         case 'data':
             receiveDataPacket(<DataPacket>packet, sender)
