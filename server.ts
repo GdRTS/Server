@@ -2,7 +2,7 @@ import * as dgram from 'dgram'
 
 // MODEL
 
-type Flag = 'connect' | 'disconnect' | 'data' | 'broadcast' | 'ack'
+type Flag = 'connect' | 'disconnect' | 'data' | 'broadcast' | 'ack' | 'cack' | 'join' | 'start'
 
 interface Packet {
     flag: Flag
@@ -10,8 +10,33 @@ interface Packet {
 
 interface ConnectionPacket extends Packet {
     flag: 'connect'
-    player: number
     seq: number
+}
+
+interface ConnectionAcknowledgementPacket extends Packet {
+    flag: 'cack'
+    player: number
+    players: number
+    ack: number
+    seq?: number
+}
+
+interface PlayerJoinedPacket extends Packet {
+    flag: 'join'
+    player: number
+    players: number
+    seq: number
+}
+
+interface GameStartedPacket extends Packet {
+    flag: 'start'
+    seq: number
+}
+
+interface GameStartedBroadcastPacket extends Packet {
+    flag: 'start'
+    seq: number
+    ack: number
 }
 
 interface DataPacket extends Packet {
@@ -73,11 +98,15 @@ const port = 4242
 // PACKET HANDLERS
 
 function receiveConnectionPacket(packet: ConnectionPacket, address: string, port: number) {
-    if (!connections[packet.player]) {
-        connections[packet.player] = {player: packet.player, address, port}
-        playerByAddress[`${address}:${port}`] = packet.player
+    let player = findFreePlayerId()
+    if (!playerByAddress[`${address}:${port}`]) {
+        connections[player] = {player: player, address, port}
+        playerByAddress[`${address}:${port}`] = player
+    } else {
+        player = playerByAddress[`${address}:${port}`]
     }
-    sendAcknowledgement(packet.player, packet.seq)
+    sendConnectionAcknowledgement(player, packet.seq)
+    sendPlayerJoined(player)
 }
 
 function receiveDataPacket(packet: DataPacket, player: number) {
@@ -103,12 +132,56 @@ function receiveAcknowledgementPacket(packet: AcknowledgementPacket, player: num
     }
 }
 
+function receiveGameStartedPacket(packet: GameStartedPacket) {
+    sendGameStartedBroadcast(packet.seq)
+}
+
 // SENDERS
 
 function sendAcknowledgement(player: number, seq: number) {
     const packet: AcknowledgementPacket = {
         flag: 'ack',
         ack: seq
+    }
+    const destination: Connection = connections[player]
+    server.send(JSON.stringify(packet), destination.port, destination.address)
+}
+
+function sendGameStartedBroadcast(seq: number) {
+    const packet: GameStartedBroadcastPacket = {
+        flag: 'start',
+        ack: seq,
+        seq: localSeq
+    }
+    Object.values(connections).forEach((connection) => {
+        packet.seq = localSeq
+        server.send(JSON.stringify(packet), connection.port, connection.address)
+        expectAcknowledgement[localSeq] = {packet, player: connection.player, ttl: resendThreshold}
+        localSeq++
+    })
+}
+
+function sendPlayerJoined(player) {
+    const packet: PlayerJoinedPacket = {
+        flag: 'join',
+        seq: localSeq,
+        players: Object.keys(connections).length,
+        player
+    }
+    Object.values(connections).filter((connection) => connection.player !== player).forEach((connection) => {
+        packet.seq = localSeq
+        server.send(JSON.stringify(packet), connection.port, connection.address)
+        expectAcknowledgement[localSeq] = {packet, player: connection.player, ttl: resendThreshold}
+        localSeq++
+    })
+}
+
+function sendConnectionAcknowledgement(player: number, seq: number) {
+    const packet: ConnectionAcknowledgementPacket = {
+        flag: 'cack',
+        ack: seq,
+        players: Object.keys(connections).length,
+        player
     }
     const destination: Connection = connections[player]
     server.send(JSON.stringify(packet), destination.port, destination.address)
@@ -123,6 +196,8 @@ function sendBroadcast(player: number, data: any, seq: number, step: number) {
         data,
         step
     }
+    // TODO: fix sending the same ack to every player rather than just the one we are responding to
+    // Same issue exists on other senders
     Object.values(connections).forEach((connection) => {
         packet.seq = localSeq
         server.send(JSON.stringify(packet), connection.port, connection.address)
@@ -153,12 +228,18 @@ server.on('message', (data: string, rinfo) => {
     switch (packet.flag) {
         case 'connect':
             receiveConnectionPacket(<ConnectionPacket>packet, rinfo.address, rinfo.port)
+            break
         case 'disconnect':
+            break
+        case 'start':
+            receiveGameStartedPacket(<GameStartedPacket>packet)
             break
         case 'data':
             receiveDataPacket(<DataPacket>packet, sender)
+            break
         case 'ack':
             receiveAcknowledgementPacket(<AcknowledgementPacket>packet, sender)
+            break
     }
     console.log(`server got: ${JSON.stringify(packet)} from ${rinfo.address}:${rinfo.port}`);
 });
@@ -179,3 +260,15 @@ setInterval(() => {
 // INITIALIZE
 
 server.bind(port);
+
+//
+
+function findFreePlayerId() {
+    let i = 0
+    while (true) {
+        if (!connections[i]) {
+            return i
+        }
+        i++
+    }
+}
